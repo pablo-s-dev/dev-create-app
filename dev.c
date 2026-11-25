@@ -15,6 +15,8 @@
 // Define the editor to be used.
 #define EDITOR "code"
 
+static const char* projectTypes[] = {"Python", "JavaScript (Node.js)", "Web (Vite)", "Python Notebook", "C"};
+
 typedef struct ProjectNode {
     int language;     // 1 = Python, 2 = JavaScript (Node.js), 3 = Web (Vite), 4 = Python Notebook, 5 = C
     int isServer;     // Only applicable for Python and JavaScript projects.
@@ -39,15 +41,17 @@ BOOL WINAPI ConsoleCtrlHandler(DWORD dwCtrlType) {
 }
 
 void clearScreen();
-void displayMenu(const char** options, int numOptions, int selectedOption);
-int getArrowKeySelection(const char** options, int numOptions);
+void printHeader(void);
+void displayMenu(const char* context, const char* prompt, const char** options, int numOptions, int selectedOption);
+int getArrowKeySelection(const char* context, const char* prompt, const char** options, int numOptions);
+void formatProjectContext(char* context, size_t size, const ProjectNode* project, int showServer, int showScope, int showDirectory);
 ProjectNode* createProjectNode();
 void configureProject(ProjectNode* project);
 void createFiles(ProjectNode* project);
 void executeCommands(ProjectNode* project);
 void freeNode(ProjectNode* project);
 char* safeGets(char* buffer, size_t bufferSize);
-int runAgain();
+int runAgain(const ProjectNode* project);
 void createVSCodeSettings(const char* projectDirectory);
 void createVSCodeSettingsWithTerminal(const char* projectDirectory, int forceIntegratedTerminal);
 char* detectCurrentTerminal();
@@ -71,11 +75,6 @@ int main() {
     int continueRunning = 1;
 
     do {
-        clearScreen();
-        printf("Project Creator Tool\n");
-        printf("====================\n\n");
-        printf("Press Ctrl+C at any time to quit\n\n");
-
         ProjectNode* project = createProjectNode();
         if (project == NULL) {
             printf("Failed to allocate memory for project. Exiting...\n");
@@ -100,12 +99,8 @@ int main() {
             break;
         }
 
+        continueRunning = runAgain(project);
         freeNode(project);
-
-        if (!keepRunning) break;
-
-        printf("\nProject creation completed!\n");
-        continueRunning = runAgain();
 
     } while (continueRunning && keepRunning);
 
@@ -133,9 +128,20 @@ void clearScreen() {
     system("cls");
 }
 
-void displayMenu(const char** options, int numOptions, int selectedOption) {
+void printHeader(void) {
+    clearScreen();
+    printf("Project Creator Tool\n");
+    printf("====================\n\n");
+}
+
+// Both initial display and arrow navigation render the same complete screen.
+void displayMenu(const char* context, const char* prompt, const char** options, int numOptions, int selectedOption) {
     if (!keepRunning) return;
-    printf("\n");
+    printHeader();
+    if (context && *context) {
+        printf("%s\n\n", context);
+    }
+    printf("%s\n\n", prompt);
     for (int i = 0; i < numOptions; i++) {
         if (i == selectedOption) {
             printf("%s> %s%s\n", HIGHLIGHT_COLOR, options[i], RESET_COLOR);
@@ -144,14 +150,15 @@ void displayMenu(const char** options, int numOptions, int selectedOption) {
         }
     }
     printf("\nUse arrow keys to navigate and Enter to select\n");
+    fflush(stdout);
 }
 
-int getArrowKeySelection(const char** options, int numOptions) {
+int getArrowKeySelection(const char* context, const char* prompt, const char** options, int numOptions) {
     if (!keepRunning) return -1;
     int selectedOption = 0;
     int key;
 
-    displayMenu(options, numOptions, selectedOption);
+    displayMenu(context, prompt, options, numOptions, selectedOption);
 
     // Poll with kbhit() so that Ctrl+C can break out.
     while (keepRunning) {
@@ -163,11 +170,10 @@ int getArrowKeySelection(const char** options, int numOptions) {
                     selectedOption = (selectedOption > 0) ? selectedOption - 1 : numOptions - 1;
                 } else if (key == ARROW_DOWN) {
                     selectedOption = (selectedOption < numOptions - 1) ? selectedOption + 1 : 0;
+                } else {
+                    continue;
                 }
-                clearScreen();
-                printf("Project Creator Tool\n");
-                printf("====================\n\n");
-                displayMenu(options, numOptions, selectedOption);
+                displayMenu(context, prompt, options, numOptions, selectedOption);
             }
             else if (key == ENTER) {
                 return selectedOption;
@@ -198,24 +204,42 @@ ProjectNode* createProjectNode() {
     return newNode;
 }
 
+// Build the context once per menu; the renderer keeps it on every redraw.
+void formatProjectContext(char* context, size_t size, const ProjectNode* project,
+                          int showServer, int showScope, int showDirectory) {
+    const char* server = "";
+    const char* scope = "";
+    if (showServer) {
+        if (project->language == 1 || project->language == 2) {
+            server = project->isServer ? "\nServer option: Create a server" : "\nServer option: No server";
+        } else if (project->language == 4) {
+            server = project->isServer ? "\nJupyter server: Start" : "\nJupyter server: Do not start";
+        }
+    }
+    if (showScope) {
+        scope = project->isTemporary ? "\nProject scope: Temporary" : "\nProject scope: Permanent";
+    }
+    snprintf(context, size, "Selected project type: %s%s%s%s%s",
+             projectTypes[project->language - 1], server, scope,
+             showDirectory ? "\nProject folder: " : "",
+             showDirectory ? project->directory : "");
+}
+
 void configureProject(ProjectNode* project) {
     if (!keepRunning) return;
-    const char* languageOptions[] = {"Python", "JavaScript (Node.js)", "Web (Vite)", "Python Notebook", "C"};
-    printf("Choose a project type:\n");
-    int languageChoice = getArrowKeySelection(languageOptions, sizeof(languageOptions) / sizeof(languageOptions[0]));
+    char context[1024];
+    int languageChoice = getArrowKeySelection("Press Ctrl+C at any time to quit",
+                                             "Choose a project type:", projectTypes,
+                                             sizeof(projectTypes) / sizeof(projectTypes[0]));
     if (!keepRunning || languageChoice == -1) return;
     project->language = languageChoice + 1; // 1,2,3,4,5
 
-    clearScreen();
-    printf("Project Creator Tool\n");
-    printf("====================\n\n");
-    printf("Selected project type: %s\n\n", languageOptions[languageChoice]);
+    formatProjectContext(context, sizeof(context), project, 0, 0, 0);
 
     // For Python and JavaScript projects, ask if a server should be created.
     if (project->language == 1 || project->language == 2) {
         const char* serverOptions[] = {"No server", "Create a server"};
-        printf("Do you want to create a server?\n");
-        int serverChoice = getArrowKeySelection(serverOptions, 2);
+        int serverChoice = getArrowKeySelection(context, "Do you want to create a server?", serverOptions, 2);
         if (!keepRunning || serverChoice == -1) return;
         project->isServer = serverChoice;
     } else if (project->language == 3) {
@@ -226,37 +250,22 @@ void configureProject(ProjectNode* project) {
     } else if (project->language == 4) {
         // For Python Notebook projects, ask if they want to start Jupyter server.
         const char* jupyterOptions[] = {"Just create notebook", "Create notebook and start Jupyter server"};
-        printf("Do you want to start Jupyter server?\n");
-        int jupyterChoice = getArrowKeySelection(jupyterOptions, 2);
+        int jupyterChoice = getArrowKeySelection(context, "Do you want to start Jupyter server?", jupyterOptions, 2);
         if (!keepRunning || jupyterChoice == -1) return;
         project->isServer = jupyterChoice;
         strcpy(project->filename, "notebook");
     }
 
-    // Ask if the project is temporary or permanent (applies to all types)
-    clearScreen();
-    printf("Project Creator Tool\n");
-    printf("====================\n\n");
-    printf("Selected project type: %s\n", languageOptions[languageChoice]);
-    if (project->language == 1 || project->language == 2){
-        printf("Server option: %s\n", (project->isServer) ? "Create a server" : "No server");
-    }
-    printf("\n");
-    
+    // Ask if the project is temporary or permanent (applies to all types).
+    formatProjectContext(context, sizeof(context), project, 1, 0, 0);
     const char* tempOptions[] = {"Permanent project", "Temporary project"};
-    printf("Is this a temporary project?\n");
-    int tempChoice = getArrowKeySelection(tempOptions, 2);
+    int tempChoice = getArrowKeySelection(context, "Is this a temporary project?", tempOptions, 2);
     if (!keepRunning || tempChoice == -1) return;
     project->isTemporary = tempChoice;
 
-    clearScreen();
-    printf("Project Creator Tool\n");
-    printf("====================\n\n");
-    printf("Project type: %s\n", languageOptions[languageChoice]);
-    if (project->language == 1 || project->language == 2){
-        printf("Server option: %s\n", (project->isServer) ? "Create a server" : "No server");
-    }
-    printf("Project scope: %s\n\n", (project->isTemporary) ? "Temporary" : "Permanent");
+    printHeader();
+    formatProjectContext(context, sizeof(context), project, 1, 1, 0);
+    printf("%s\n\n", context);
 
     if (project->isTemporary == 1) {
         // Create a unique subfolder under TEMP.
@@ -508,8 +517,9 @@ void executeCommands(ProjectNode* project) {
         system(command);
         // Ask about opening external terminal
         const char* terminalOptions[] = {"No external terminal", "Open external terminal in project folder"};
-        printf("Do you want to open an external terminal?\n");
-        int terminalChoice = getArrowKeySelection(terminalOptions, 2);
+        char context[1024];
+        formatProjectContext(context, sizeof(context), project, 1, 1, 1);
+        int terminalChoice = getArrowKeySelection(context, "Do you want to open an external terminal?", terminalOptions, 2);
         if (!keepRunning || terminalChoice == -1) return;
         
         if (terminalChoice == 1) {
@@ -571,8 +581,9 @@ void executeCommands(ProjectNode* project) {
     } else {
         // For non-servers, ask about opening external terminal
         const char* terminalOptions[] = {"No external terminal", "Open external terminal in project folder"};
-        printf("Do you want to open an external terminal?\n");
-        int terminalChoice = getArrowKeySelection(terminalOptions, 2);
+        char context[1024];
+        formatProjectContext(context, sizeof(context), project, 1, 1, 1);
+        int terminalChoice = getArrowKeySelection(context, "Do you want to open an external terminal?", terminalOptions, 2);
         if (!keepRunning || terminalChoice == -1) return;
         
         if (terminalChoice == 1) {
@@ -587,11 +598,14 @@ void freeNode(ProjectNode* project) {
     }
 }
 
-int runAgain() {
+int runAgain(const ProjectNode* project) {
     if (!keepRunning) return 0;
     const char* continueOptions[] = {"Create a new project", "Quit"};
-    printf("\nWhat would you like to do next?\n");
-    int choice = getArrowKeySelection(continueOptions, 2);
+    char projectContext[1024];
+    char context[1100];
+    formatProjectContext(projectContext, sizeof(projectContext), project, 1, 1, 1);
+    snprintf(context, sizeof(context), "Project creation completed!\n\n%s", projectContext);
+    int choice = getArrowKeySelection(context, "What would you like to do next?", continueOptions, 2);
     if (!keepRunning || choice == -1) return 0;
     return (choice == 0) ? 1 : 0;
 }
@@ -712,8 +726,7 @@ void formatTerminalCommand(char* output, const char* terminal, const char* worki
 int askForTerminalChoice() {
     if (!keepRunning) return 2;
     const char* terminalTypes[] = {"Warp Terminal", "Windows Terminal", "Command Prompt"};
-    printf("Choose your preferred terminal:\n");
-    int choice = getArrowKeySelection(terminalTypes, 3);
+    int choice = getArrowKeySelection(NULL, "Choose your preferred terminal:", terminalTypes, 3);
     if (!keepRunning || choice == -1) return 2;
     return choice;
 }
