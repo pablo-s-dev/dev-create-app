@@ -331,15 +331,9 @@ void createFiles(ProjectNode* project) {
         _mkdir(project->directory);
     }
 
-    // Create VS Code settings for all project types
-    if (project->language == 4) {
-        // For notebooks, hide integrated terminal (they use Jupyter)
-
-        createVSCodeSettingsWithTerminal(project->directory, 0); // 0 = hide terminal
-    } else {
-        // For other projects, always show integrated terminal
-
-        createVSCodeSettingsWithTerminal(project->directory, 1); // 1 = show terminal
+    // Only script and web projects need an automatic integrated terminal.
+    if (project->language != 4) {
+        createVSCodeSettingsWithTerminal(project->directory, 1);
     }
 
     if (project->language == 1) { // Python
@@ -455,20 +449,9 @@ void executeCommands(ProjectNode* project) {
     if (!keepRunning) return;
     char command[2048];
     char innerCommand[1024];
-    char* terminal = detectCurrentTerminal();
-
     // For Python Notebook projects
     if (project->language == 4) {
         if (project->isServer == 1) {
-            const char* terminalOptions[] = {"No external terminal", "Open external terminal in project folder"};
-            printf("Do you want to open an external terminal?\n");
-            int terminalChoice = getArrowKeySelection(terminalOptions, 2);
-            if (!keepRunning || terminalChoice == -1) return;
-
-            if (terminalChoice == 1) {
-                launchTerminalDirect(terminal, project->directory);
-            }
-
             // Jupyter opens the notebook in the default browser.
             // Keep the server in the current terminal until it is stopped.
             snprintf(command, sizeof(command),
@@ -485,6 +468,8 @@ void executeCommands(ProjectNode* project) {
         }
         return;
     }
+
+    char* terminal = detectCurrentTerminal();
 
     // For Vite projects, first check if the folder exists.
     if (project->language == 3) {
