@@ -16,7 +16,7 @@
 #define EDITOR "code"
 
 typedef struct ProjectNode {
-    int language;     // 1 = Python, 2 = JavaScript (Node.js), 3 = Web (Vite), 4 = Python Notebook
+    int language;     // 1 = Python, 2 = JavaScript (Node.js), 3 = Web (Vite), 4 = Python Notebook, 5 = C
     int isServer;     // Only applicable for Python and JavaScript projects.
     int isTemporary;  // 0 = Permanent, 1 = Temporary
     char projectName[256];
@@ -200,12 +200,11 @@ ProjectNode* createProjectNode() {
 
 void configureProject(ProjectNode* project) {
     if (!keepRunning) return;
-    // Add "Python Notebook" as a fourth option.
-    const char* languageOptions[] = {"Python", "JavaScript (Node.js)", "Web (Vite)", "Python Notebook"};
+    const char* languageOptions[] = {"Python", "JavaScript (Node.js)", "Web (Vite)", "Python Notebook", "C"};
     printf("Choose a project type:\n");
-    int languageChoice = getArrowKeySelection(languageOptions, 4);
+    int languageChoice = getArrowKeySelection(languageOptions, sizeof(languageOptions) / sizeof(languageOptions[0]));
     if (!keepRunning || languageChoice == -1) return;
-    project->language = languageChoice + 1; // 1,2,3,4
+    project->language = languageChoice + 1; // 1,2,3,4,5
 
     clearScreen();
     printf("Project Creator Tool\n");
@@ -281,13 +280,15 @@ void configureProject(ProjectNode* project) {
         printf("Creating project in: %s\n", project->directory);
     }
 
-    // For Python/JavaScript projects, set a default filename.
+    // Set the default filename for projects with an entry point.
     if (project->language == 1) { // Python
         strcpy(project->filename, (project->isServer) ? "app" : "main");
     } else if (project->language == 2) { // JavaScript (Node.js)
         strcpy(project->filename, (project->isServer) ? "index" : "main");
     } else if (project->language == 4) { // Python Notebook
         strcpy(project->filename, "notebook");
+    } else if (project->language == 5) { // C
+        strcpy(project->filename, "main");
     }
 }
 
@@ -327,11 +328,11 @@ void createFiles(ProjectNode* project) {
             printf("Vite project created in %s\n", project->directory);
         }
     } else {
-        // For Python and JavaScript projects, create the project directory.
+        // Create the project directory for non-Vite projects.
         _mkdir(project->directory);
     }
 
-    // Only script and web projects need an automatic integrated terminal.
+    // All non-notebook projects get an automatic integrated terminal.
     if (project->language != 4) {
         createVSCodeSettingsWithTerminal(project->directory, 1);
     }
@@ -403,6 +404,22 @@ void createFiles(ProjectNode* project) {
             printf("JavaScript project created in %s without server.\n", filePath);
         }
         fclose(file);
+    }
+    else if (project->language == 5) { // C
+        char filePath[1024];
+        snprintf(filePath, sizeof(filePath), "%s\\%s.c", project->directory, project->filename);
+        FILE* file = fopen(filePath, "w");
+        if (file == NULL) {
+            fprintf(stderr, "Error: Could not create file at %s\n", filePath);
+            exit(1);
+        }
+        fprintf(file, "#include <stdio.h>\n\n"
+                      "int main(void) {\n"
+                      "    printf(\"Hello World\\n\");\n"
+                      "    return 0;\n"
+                      "}\n");
+        fclose(file);
+        printf("C project created in %s\n", filePath);
     }
     else if (project->language == 4) { // Python Notebook
         char filePath[1024];
@@ -502,12 +519,14 @@ void executeCommands(ProjectNode* project) {
         return;
     }
 
-    // For Python/JavaScript projects, determine file extension.
+    // Determine the source file extension for Python, JavaScript and C.
     char extension[4];
     if (project->language == 1) {
         strcpy(extension, ".py");
     } else if (project->language == 2) {
         strcpy(extension, ".js");
+    } else if (project->language == 5) {
+        strcpy(extension, ".c");
     } else {
         return;
     }
