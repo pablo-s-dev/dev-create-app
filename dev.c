@@ -52,7 +52,7 @@ void createVSCodeSettings(const char* projectDirectory);
 void createVSCodeSettingsWithTerminal(const char* projectDirectory, int forceIntegratedTerminal);
 char* detectCurrentTerminal();
 void formatTerminalCommand(char* output, const char* terminal, const char* workingDir, const char* command, int keepOpen);
-void launchTerminalDirect(const char* terminal, const char* workingDir, const char* command);
+void launchTerminalDirect(const char* terminal, const char* workingDir);
 int askForTerminalChoice();
 
 int main() {
@@ -459,38 +459,29 @@ void executeCommands(ProjectNode* project) {
 
     // For Python Notebook projects
     if (project->language == 4) {
-        char filePath[1024];
-        sprintf(filePath, "%s\\%s.ipynb", project->directory, project->filename);
-        
-        // Open the project folder and notebook file in VS Code
-        STARTUPINFO si;
-        PROCESS_INFORMATION pi;
-        char vscodeCmd[1024];
-        
-        ZeroMemory(&si, sizeof(si));
-        si.cb = sizeof(si);
-        ZeroMemory(&pi, sizeof(pi));
-        
-        sprintf(command, EDITOR " \"%s\" \"%s\"", project->directory, filePath);
-        system(command);
-        
-        // If user chose to start Jupyter server
         if (project->isServer == 1) {
-            // Ask about external terminal
             const char* terminalOptions[] = {"No external terminal", "Open external terminal in project folder"};
             printf("Do you want to open an external terminal?\n");
             int terminalChoice = getArrowKeySelection(terminalOptions, 2);
             if (!keepRunning || terminalChoice == -1) return;
-            
+
             if (terminalChoice == 1) {
-                // Open terminal in project directory with welcome message
-                launchTerminalDirect(terminal, project->directory, "echo You are inside the project folder! && dir /b");
+                launchTerminalDirect(terminal, project->directory);
             }
-            
-            // Start Jupyter server in background
-            char jupyterCmd[1024];
-            sprintf(jupyterCmd, "cd /d \"%s\" && jupyter notebook", project->directory);
-            system(jupyterCmd);
+
+            // Jupyter opens the notebook in the default browser.
+            // Keep the server in the current terminal until it is stopped.
+            snprintf(command, sizeof(command),
+                     "cd /d \"%s\" && jupyter notebook --ServerApp.open_browser=True \"%s.ipynb\"",
+                     project->directory, project->filename);
+            if (system(command) != 0 && keepRunning) {
+                fprintf(stderr, "Could not start Jupyter Notebook. Check your Jupyter installation.\n");
+            }
+        } else {
+            char filePath[1024];
+            snprintf(filePath, sizeof(filePath), "%s\\%s.ipynb", project->directory, project->filename);
+            snprintf(command, sizeof(command), EDITOR " \"%s\" \"%s\"", project->directory, filePath);
+            system(command);
         }
         return;
     }
@@ -521,7 +512,7 @@ void executeCommands(ProjectNode* project) {
         
         if (terminalChoice == 1) {
             // Launch a terminal in the project directory
-            launchTerminalDirect(terminal, project->directory, "echo You are inside the project folder! && dir /b");
+            launchTerminalDirect(terminal, project->directory);
         }
         return;
     }
@@ -582,9 +573,9 @@ void executeCommands(ProjectNode* project) {
         
         if (terminalChoice == 1) {
             if (project->language == 1) { // Python non-server
-                launchTerminalDirect(terminal, project->directory, "echo You are inside the project folder: && echo. && dir /b");
+                launchTerminalDirect(terminal, project->directory);
             } else if (project->language == 2) { // JavaScript non-server
-                launchTerminalDirect(terminal, project->directory, "echo You are inside the project folder: && echo. && dir /b");
+                launchTerminalDirect(terminal, project->directory);
             }
         }
     }
@@ -629,10 +620,19 @@ void createVSCodeSettingsWithTerminal(const char* projectDirectory, int forceInt
             fprintf(tasksFile, "        {\n");
             fprintf(tasksFile, "            \"label\": \"Opening Shell\",\n");
             fprintf(tasksFile, "            \"type\": \"shell\",\n");
-            fprintf(tasksFile, "            \"command\": \"echo\",\n");
-            fprintf(tasksFile, "            \"group\": \"build\",\n");
+            // Launch an interactive shell without running a command.
+            // Prefer PowerShell 7 when installed; fall back to Windows PowerShell.
+            const char* shell = SearchPathA(NULL, "pwsh.exe", NULL, 0, NULL, NULL)
+                                ? "pwsh.exe" : "powershell.exe";
+            fprintf(tasksFile, "            \"command\": \"\",\n");
+            fprintf(tasksFile, "            \"options\": {\n");
+            fprintf(tasksFile, "                \"shell\": { \"executable\": \"%s\", \"args\": [] }\n", shell);
+            fprintf(tasksFile, "            },\n");
+            fprintf(tasksFile, "            \"isBackground\": true,\n");
+            fprintf(tasksFile, "            \"problemMatcher\": [],\n");
             fprintf(tasksFile, "            \"presentation\": {\n");
-            fprintf(tasksFile, "                \"echo\": true,\n");
+            fprintf(tasksFile, "                \"echo\": false,\n");
+            fprintf(tasksFile, "                \"showReuseMessage\": false,\n");
             fprintf(tasksFile, "                \"reveal\": \"always\",\n");
             fprintf(tasksFile, "                \"focus\": false,\n");
             fprintf(tasksFile, "                \"panel\": \"new\"\n");
@@ -718,19 +718,19 @@ int askForTerminalChoice() {
     return choice;
 }
 
-void launchTerminalDirect(const char* terminal, const char* workingDir, const char* command) {
+void launchTerminalDirect(const char* terminal, const char* workingDir) {
     char cmdLine[2048];
-    
+
     if (strcmp(terminal, "wt") == 0) {
-        // Windows Terminal
-        sprintf(cmdLine, "wt -d \"%s\" -- cmd /k \"echo You are inside the project folder: && echo. && dir /b\"", workingDir);
+        // Use Windows Terminal's default profile and starting directory.
+        snprintf(cmdLine, sizeof(cmdLine), "wt -d \"%s\"", workingDir);
     } else if (strcmp(terminal, "powershell") == 0) {
-        // PowerShell
-        sprintf(cmdLine, "powershell -NoExit -Command \"cd '%s'; Write-Host 'You are inside the project folder:' -ForegroundColor Green; Write-Host ''; Get-ChildItem -Name\"", workingDir);
+        const char* shell = SearchPathA(NULL, "pwsh.exe", NULL, 0, NULL, NULL)
+                            ? "pwsh.exe" : "powershell.exe";
+        snprintf(cmdLine, sizeof(cmdLine), "start \"\" /D \"%s\" %s", workingDir, shell);
     } else {
-        // CMD or other
-        sprintf(cmdLine, "cmd /k \"cd /d \"%s\" && echo You are inside the project folder: && echo. && dir /b\"", workingDir);
+        snprintf(cmdLine, sizeof(cmdLine), "start \"\" /D \"%s\" cmd.exe", workingDir);
     }
-    
+
     system(cmdLine);
 }
