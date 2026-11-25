@@ -13,10 +13,10 @@
 #define ESC 27
 
 // Define the editor to be used.
-#define EDITOR "zed"
+#define EDITOR "code"
 
 typedef struct ProjectNode {
-    int language;     // 1 = Python, 2 = JavaScript (Node.js), 3 = Web (Vite)
+    int language;     // 1 = Python, 2 = JavaScript (Node.js), 3 = Web (Vite), 4 = Python Notebook
     int isServer;     // Only applicable for Python and JavaScript projects.
     int isTemporary;  // 0 = Permanent, 1 = Temporary
     char projectName[256];
@@ -48,6 +48,12 @@ void executeCommands(ProjectNode* project);
 void freeNode(ProjectNode* project);
 char* safeGets(char* buffer, size_t bufferSize);
 int runAgain();
+void createVSCodeSettings(const char* projectDirectory);
+void createVSCodeSettingsWithTerminal(const char* projectDirectory, int forceIntegratedTerminal);
+char* detectCurrentTerminal();
+void formatTerminalCommand(char* output, const char* terminal, const char* workingDir, const char* command, int keepOpen);
+void launchTerminalDirect(const char* terminal, const char* workingDir, const char* command);
+int askForTerminalChoice();
 
 int main() {
     // Set up Ctrl+C handler using Windows API
@@ -194,12 +200,12 @@ ProjectNode* createProjectNode() {
 
 void configureProject(ProjectNode* project) {
     if (!keepRunning) return;
-    // Add "Web (Vite)" as a third option.
-    const char* languageOptions[] = {"Python", "JavaScript (Node.js)", "Web (Vite)"};
+    // Add "Python Notebook" as a fourth option.
+    const char* languageOptions[] = {"Python", "JavaScript (Node.js)", "Web (Vite)", "Python Notebook"};
     printf("Choose a project type:\n");
-    int languageChoice = getArrowKeySelection(languageOptions, 3);
+    int languageChoice = getArrowKeySelection(languageOptions, 4);
     if (!keepRunning || languageChoice == -1) return;
-    project->language = languageChoice + 1; // 1,2,3
+    project->language = languageChoice + 1; // 1,2,3,4
 
     clearScreen();
     printf("Project Creator Tool\n");
@@ -207,20 +213,37 @@ void configureProject(ProjectNode* project) {
     printf("Selected project type: %s\n\n", languageOptions[languageChoice]);
 
     // For Python and JavaScript projects, ask if a server should be created.
-    if (project->language != 3) {
+    if (project->language == 1 || project->language == 2) {
         const char* serverOptions[] = {"No server", "Create a server"};
         printf("Do you want to create a server?\n");
         int serverChoice = getArrowKeySelection(serverOptions, 2);
         if (!keepRunning || serverChoice == -1) return;
         project->isServer = serverChoice;
-    } else {
+    } else if (project->language == 3) {
         // For Vite projects, we always run the dev server.
         project->isServer = 1;
         // For Vite, the filename field is not used.
         strcpy(project->filename, "");
+    } else if (project->language == 4) {
+        // For Python Notebook projects, ask if they want to start Jupyter server.
+        const char* jupyterOptions[] = {"Just create notebook", "Create notebook and start Jupyter server"};
+        printf("Do you want to start Jupyter server?\n");
+        int jupyterChoice = getArrowKeySelection(jupyterOptions, 2);
+        if (!keepRunning || jupyterChoice == -1) return;
+        project->isServer = jupyterChoice;
+        strcpy(project->filename, "notebook");
     }
 
     // Ask if the project is temporary or permanent (applies to all types)
+    clearScreen();
+    printf("Project Creator Tool\n");
+    printf("====================\n\n");
+    printf("Selected project type: %s\n", languageOptions[languageChoice]);
+    if (project->language == 1 || project->language == 2){
+        printf("Server option: %s\n", (project->isServer) ? "Create a server" : "No server");
+    }
+    printf("\n");
+    
     const char* tempOptions[] = {"Permanent project", "Temporary project"};
     printf("Is this a temporary project?\n");
     int tempChoice = getArrowKeySelection(tempOptions, 2);
@@ -231,8 +254,9 @@ void configureProject(ProjectNode* project) {
     printf("Project Creator Tool\n");
     printf("====================\n\n");
     printf("Project type: %s\n", languageOptions[languageChoice]);
-    if (project->language != 3)
+    if (project->language == 1 || project->language == 2){
         printf("Server option: %s\n", (project->isServer) ? "Create a server" : "No server");
+    }
     printf("Project scope: %s\n\n", (project->isTemporary) ? "Temporary" : "Permanent");
 
     if (project->isTemporary == 1) {
@@ -243,7 +267,7 @@ void configureProject(ProjectNode* project) {
             GetSystemTime(&st);
             sprintf(project->directory, "%s\\Dev_%04d%02d%02d_%02d%02d%02d",
                     tempDir, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-            printf("Using temporary folder: %s\n", project->directory);
+
         } else {
             printf("Could not find TEMP directory. Exiting...\n");
             exit(1);
@@ -262,6 +286,8 @@ void configureProject(ProjectNode* project) {
         strcpy(project->filename, (project->isServer) ? "app" : "main");
     } else if (project->language == 2) { // JavaScript (Node.js)
         strcpy(project->filename, (project->isServer) ? "index" : "main");
+    } else if (project->language == 4) { // Python Notebook
+        strcpy(project->filename, "notebook");
     }
 }
 
@@ -300,10 +326,20 @@ void createFiles(ProjectNode* project) {
             }
             printf("Vite project created in %s\n", project->directory);
         }
-        return;
     } else {
         // For Python and JavaScript projects, create the project directory.
         _mkdir(project->directory);
+    }
+
+    // Create VS Code settings for all project types
+    if (project->language == 4) {
+        // For notebooks, hide integrated terminal (they use Jupyter)
+
+        createVSCodeSettingsWithTerminal(project->directory, 0); // 0 = hide terminal
+    } else {
+        // For other projects, always show integrated terminal
+
+        createVSCodeSettingsWithTerminal(project->directory, 1); // 1 = show terminal
     }
 
     if (project->language == 1) { // Python
@@ -374,12 +410,90 @@ void createFiles(ProjectNode* project) {
         }
         fclose(file);
     }
+    else if (project->language == 4) { // Python Notebook
+        char filePath[1024];
+        sprintf(filePath, "%s\\%s.ipynb", project->directory, project->filename);
+        FILE* file = fopen(filePath, "w");
+        if (file == NULL) {
+            printf("Error: Could not create file at %s\n", filePath);
+            exit(1);
+        }
+        // Create a basic Jupyter notebook structure
+        fprintf(file, "{\n");
+        fprintf(file, " \"cells\": [\n");
+        fprintf(file, "  {\n");
+        fprintf(file, "   \"cell_type\": \"code\",\n");
+        fprintf(file, "   \"execution_count\": null,\n");
+        fprintf(file, "   \"metadata\": {},\n");
+        fprintf(file, "   \"outputs\": [],\n");
+        fprintf(file, "   \"source\": [\n");
+        fprintf(file, "    \"print('Hello, Jupyter!')\\n\",\n");
+        fprintf(file, "    \"# Start coding here...\"\n");
+        fprintf(file, "   ]\n");
+        fprintf(file, "  }\n");
+        fprintf(file, " ],\n");
+        fprintf(file, " \"metadata\": {\n");
+        fprintf(file, "  \"kernelspec\": {\n");
+        fprintf(file, "   \"display_name\": \"Python 3\",\n");
+        fprintf(file, "   \"language\": \"python\",\n");
+        fprintf(file, "   \"name\": \"python3\"\n");
+        fprintf(file, "  },\n");
+        fprintf(file, "  \"language_info\": {\n");
+        fprintf(file, "   \"name\": \"python\",\n");
+        fprintf(file, "   \"version\": \"3.8.0\"\n");
+        fprintf(file, "  }\n");
+        fprintf(file, " },\n");
+        fprintf(file, " \"nbformat\": 4,\n");
+        fprintf(file, " \"nbformat_minor\": 4\n");
+        fprintf(file, "}\n");
+        fclose(file);
+        printf("Python notebook created in %s\n", filePath);
+    }
 }
 
 void executeCommands(ProjectNode* project) {
     if (!keepRunning) return;
     char command[1024];
     char innerCommand[1024];
+    char* terminal = detectCurrentTerminal();
+
+    // For Python Notebook projects
+    if (project->language == 4) {
+        char filePath[1024];
+        sprintf(filePath, "%s\\%s.ipynb", project->directory, project->filename);
+        
+        // Open the project folder and notebook file in VS Code
+        STARTUPINFO si;
+        PROCESS_INFORMATION pi;
+        char vscodeCmd[1024];
+        
+        ZeroMemory(&si, sizeof(si));
+        si.cb = sizeof(si);
+        ZeroMemory(&pi, sizeof(pi));
+        
+        sprintf(command, EDITOR " \"%s\" \"%s\"", project->directory, filePath);
+        system(command);
+        
+        // If user chose to start Jupyter server
+        if (project->isServer == 1) {
+            // Ask about external terminal
+            const char* terminalOptions[] = {"No external terminal", "Open external terminal in project folder"};
+            printf("Do you want to open an external terminal?\n");
+            int terminalChoice = getArrowKeySelection(terminalOptions, 2);
+            if (!keepRunning || terminalChoice == -1) return;
+            
+            if (terminalChoice == 1) {
+                // Open terminal in project directory with welcome message
+                launchTerminalDirect(terminal, project->directory, "echo You are inside the project folder! && dir /b");
+            }
+            
+            // Start Jupyter server in background
+            char jupyterCmd[1024];
+            sprintf(jupyterCmd, "cd /d \"%s\" && jupyter notebook", project->directory);
+            system(jupyterCmd);
+        }
+        return;
+    }
 
     // For Vite projects, first check if the folder exists.
     if (project->language == 3) {
@@ -388,13 +502,27 @@ void executeCommands(ProjectNode* project) {
             printf("Vite project creation was cancelled; skipping launch commands.\n");
             return;
         }
-        // Open the project folder in the defined editor.
-        sprintf(command, "start \"\" " EDITOR " \"%s\"", project->directory);
+            // Open the project folder in VS Code
+        STARTUPINFO si;
+        PROCESS_INFORMATION pi;
+        char vscodeCmd[1024];
+        
+        ZeroMemory(&si, sizeof(si));
+        si.cb = sizeof(si);
+        ZeroMemory(&pi, sizeof(pi));
+        
+        sprintf(command, EDITOR " \"%s\"", project->directory);
         system(command);
-        // Launch a terminal to run "npm install" and "npm run dev".
-        sprintf(innerCommand, "cd /d \"%s\" && npm install && npm run dev", project->directory);
-        sprintf(command, "start \"\" cmd /k \"%s\"", innerCommand);
-        system(command);
+        // Ask about opening external terminal
+        const char* terminalOptions[] = {"No external terminal", "Open external terminal in project folder"};
+        printf("Do you want to open an external terminal?\n");
+        int terminalChoice = getArrowKeySelection(terminalOptions, 2);
+        if (!keepRunning || terminalChoice == -1) return;
+        
+        if (terminalChoice == 1) {
+            // Launch a terminal in the project directory
+            launchTerminalDirect(terminal, project->directory, "echo You are inside the project folder! && dir /b");
+        }
         return;
     }
 
@@ -412,33 +540,52 @@ void executeCommands(ProjectNode* project) {
     char filePath[1024];
     sprintf(filePath, "%s\\%s%s", project->directory, project->filename, extension);
 
-    // Open the project folder and main file in the defined editor.
-    sprintf(command, "start \"\" " EDITOR " \"%s\" \"%s\"", project->directory, filePath);
+    // Open the project folder and main file in VS Code
+    STARTUPINFO si;
+    PROCESS_INFORMATION pi;
+    char vscodeCmd[1024];
+    
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    ZeroMemory(&pi, sizeof(pi));
+    
+    sprintf(command, EDITOR " \"%s\" \"%s\"", project->directory, filePath);
     system(command);
 
     if (project->isServer == 1) {
+        // For servers, always run in current terminal (no question asked)
+        printf("Starting server in current terminal...\n");
+        
         if (project->language == 1) { // Python (Flask)
-            sprintf(innerCommand, "cd /d \"%s\" && python %s%s && pause", project->directory, project->filename, extension);
-            sprintf(command, "start \"\" cmd /k \"%s\"", innerCommand);
-            system(command);
+            char serverCmd[1024];
+            sprintf(serverCmd, "cd /d \"%s\" && python %s.py", project->directory, project->filename);
+            system(serverCmd);
+            
+            // Open browser for Flask server after a delay
             system("timeout /t 3 > nul");
-            system("start \"\" http://127.0.0.1:5000");
+            system("rundll32.exe url.dll,FileProtocolHandler http://127.0.0.1:5000");
         } else if (project->language == 2) { // JavaScript (Node.js)
-            sprintf(innerCommand, "cd /d \"%s\" && npm install && nodemon %s%s", project->directory, project->filename, extension);
-            sprintf(command, "start \"\" cmd /k \"%s\"", innerCommand);
-            system(command);
+            char serverCmd[1024];
+            sprintf(serverCmd, "cd /d \"%s\" && npm install && nodemon %s.js", project->directory, project->filename);
+            system(serverCmd);
+            
+            // Open browser for Node.js server after a delay
             system("timeout /t 5 > nul");
-            system("start \"\" http://localhost:3000");
+            system("rundll32.exe url.dll,FileProtocolHandler http://localhost:3000");
         }
     } else {
-        if (project->language == 1) { // Python non-server
-            sprintf(innerCommand, "cd /d \"%s\" && python %s%s && pause", project->directory, project->filename, extension);
-            sprintf(command, "start \"\" cmd /k \"%s\"", innerCommand);
-            system(command);
-        } else if (project->language == 2) { // JavaScript non-server
-            sprintf(innerCommand, "cd /d \"%s\" && node %s%s && pause", project->directory, project->filename, extension);
-            sprintf(command, "start \"\" cmd /k \"%s\"", innerCommand);
-            system(command);
+        // For non-servers, ask about opening external terminal
+        const char* terminalOptions[] = {"No external terminal", "Open external terminal in project folder"};
+        printf("Do you want to open an external terminal?\n");
+        int terminalChoice = getArrowKeySelection(terminalOptions, 2);
+        if (!keepRunning || terminalChoice == -1) return;
+        
+        if (terminalChoice == 1) {
+            if (project->language == 1) { // Python non-server
+                launchTerminalDirect(terminal, project->directory, "echo You are inside the project folder: && echo. && dir /b");
+            } else if (project->language == 2) { // JavaScript non-server
+                launchTerminalDirect(terminal, project->directory, "echo You are inside the project folder: && echo. && dir /b");
+            }
         }
     }
 }
@@ -456,4 +603,134 @@ int runAgain() {
     int choice = getArrowKeySelection(continueOptions, 2);
     if (!keepRunning || choice == -1) return 0;
     return (choice == 0) ? 1 : 0;
+}
+
+
+
+void createVSCodeSettingsWithTerminal(const char* projectDirectory, int forceIntegratedTerminal) {
+    if (!keepRunning) return;
+    
+
+    
+    char vscodeDir[1024];
+    sprintf(vscodeDir, "%s\\.vscode", projectDirectory);
+    _mkdir(vscodeDir);
+    
+    // Create tasks.json for non-notebook projects to auto-open terminal
+    if (forceIntegratedTerminal) {
+
+        char tasksPath[1024];
+        sprintf(tasksPath, "%s\\tasks.json", vscodeDir);
+        FILE* tasksFile = fopen(tasksPath, "w");
+        if (tasksFile != NULL) {
+            fprintf(tasksFile, "{\n");
+            fprintf(tasksFile, "    \"version\": \"2.0.0\",\n");
+            fprintf(tasksFile, "    \"tasks\": [\n");
+            fprintf(tasksFile, "        {\n");
+            fprintf(tasksFile, "            \"label\": \"Opening Shell\",\n");
+            fprintf(tasksFile, "            \"type\": \"shell\",\n");
+            fprintf(tasksFile, "            \"command\": \"echo\",\n");
+            fprintf(tasksFile, "            \"group\": \"build\",\n");
+            fprintf(tasksFile, "            \"presentation\": {\n");
+            fprintf(tasksFile, "                \"echo\": true,\n");
+            fprintf(tasksFile, "                \"reveal\": \"always\",\n");
+            fprintf(tasksFile, "                \"focus\": false,\n");
+            fprintf(tasksFile, "                \"panel\": \"new\"\n");
+            fprintf(tasksFile, "            },\n");
+            fprintf(tasksFile, "            \"runOptions\": {\n");
+            fprintf(tasksFile, "                \"runOn\": \"folderOpen\"\n");
+            fprintf(tasksFile, "            }\n");
+            fprintf(tasksFile, "        }\n");
+            fprintf(tasksFile, "    ]\n");
+            fprintf(tasksFile, "}\n");
+            fclose(tasksFile);
+
+        }
+    } else {
+        printf("DEBUG: Skipping tasks.json for NOTEBOOK project\n");
+    }
+}
+
+char* detectCurrentTerminal() {
+    static char terminalCommand[512];
+    
+    // Check for Windows Terminal
+    char* wtSession = getenv("WT_SESSION");
+    if (wtSession != NULL) {
+        strcpy(terminalCommand, "wt");
+        return terminalCommand;
+    }
+    
+    // Check for ConEmu
+    char* conEmuDir = getenv("ConEmuDir");
+    if (conEmuDir != NULL) {
+        strcpy(terminalCommand, "ConEmu64");
+        return terminalCommand;
+    }
+    
+    // Check for Cmder
+    char* cmderRoot = getenv("CMDER_ROOT");
+    if (cmderRoot != NULL) {
+        sprintf(terminalCommand, "\"%s\\Cmder.exe\"", cmderRoot);
+        return terminalCommand;
+    }
+    
+    // Check for PowerShell (if PSMODULEPATH exists, likely PowerShell)
+    char* psModulePath = getenv("PSMODULEPATH");
+    if (psModulePath != NULL) {
+        // Check if we're in PowerShell by looking at the parent process
+        strcpy(terminalCommand, "powershell");
+        return terminalCommand;
+    }
+    
+    // Default fallback to cmd
+    strcpy(terminalCommand, "cmd");
+    return terminalCommand;
+}
+
+void formatTerminalCommand(char* output, const char* terminal, const char* workingDir, const char* command, int keepOpen) {
+    if (strcmp(terminal, "wt") == 0) {
+        // Windows Terminal - open directly without wrapping in cmd
+        sprintf(output, "wt -d \"%s\"", workingDir);
+    } else if (strcmp(terminal, "powershell") == 0) {
+        // PowerShell
+        if (keepOpen) {
+            sprintf(output, "start \"\" powershell -NoExit -Command \"cd '%s'; %s\"", workingDir, command);
+        } else {
+            sprintf(output, "start \"\" powershell -Command \"cd '%s'; %s\"", workingDir, command);
+        }
+    } else {
+        // Default cmd or other terminals
+        if (keepOpen) {
+            sprintf(output, "start \"\" %s /k \"cd /d \"%s\" && %s\"", terminal, workingDir, command);
+        } else {
+            sprintf(output, "start \"\" %s /c \"cd /d \"%s\" && %s\"", terminal, workingDir, command);
+        }
+    }
+}
+
+int askForTerminalChoice() {
+    if (!keepRunning) return 2;
+    const char* terminalTypes[] = {"Warp Terminal", "Windows Terminal", "Command Prompt"};
+    printf("Choose your preferred terminal:\n");
+    int choice = getArrowKeySelection(terminalTypes, 3);
+    if (!keepRunning || choice == -1) return 2;
+    return choice;
+}
+
+void launchTerminalDirect(const char* terminal, const char* workingDir, const char* command) {
+    char cmdLine[2048];
+    
+    if (strcmp(terminal, "wt") == 0) {
+        // Windows Terminal
+        sprintf(cmdLine, "wt -d \"%s\" -- cmd /k \"echo You are inside the project folder: && echo. && dir /b\"", workingDir);
+    } else if (strcmp(terminal, "powershell") == 0) {
+        // PowerShell
+        sprintf(cmdLine, "powershell -NoExit -Command \"cd '%s'; Write-Host 'You are inside the project folder:' -ForegroundColor Green; Write-Host ''; Get-ChildItem -Name\"", workingDir);
+    } else {
+        // CMD or other
+        sprintf(cmdLine, "cmd /k \"cd /d \"%s\" && echo You are inside the project folder: && echo. && dir /b\"", workingDir);
+    }
+    
+    system(cmdLine);
 }
