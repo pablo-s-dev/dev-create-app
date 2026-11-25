@@ -42,7 +42,14 @@ BOOL WINAPI ConsoleCtrlHandler(DWORD dwCtrlType) {
 
 void clearScreen();
 void printHeader(void);
-void displayMenu(const char* context, const char* prompt, const char** options, int numOptions, int selectedOption);
+typedef struct MenuLayout {
+    COORD firstOption;
+    COORD end;
+    SHORT bufferWidth;
+    BOOL valid;
+} MenuLayout;
+
+MenuLayout displayMenu(const char* context, const char* prompt, const char** options, int numOptions, int selectedOption);
 int getArrowKeySelection(const char* context, const char* prompt, const char** options, int numOptions);
 void formatProjectContext(char* context, size_t size, const ProjectNode* project, int showServer, int showScope, int showDirectory);
 ProjectNode* createProjectNode();
@@ -134,23 +141,77 @@ void printHeader(void) {
     printf("====================\n\n");
 }
 
-// Both initial display and arrow navigation render the same complete screen.
-void displayMenu(const char* context, const char* prompt, const char** options, int numOptions, int selectedOption) {
-    if (!keepRunning) return;
+static void printMenuOption(const char* option, int selected) {
+    if (selected) {
+        printf("%s> %s%s", HIGHLIGHT_COLOR, option, RESET_COLOR);
+    } else {
+        printf("  %s", option);
+    }
+}
+
+// Draw the full screen only when entering a menu or recovering its layout.
+MenuLayout displayMenu(const char* context, const char* prompt, const char** options, int numOptions, int selectedOption) {
+    MenuLayout layout = {0};
+    if (!keepRunning) return layout;
+
+    HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
+    CONSOLE_SCREEN_BUFFER_INFO before, after;
     printHeader();
     if (context && *context) {
         printf("%s\n\n", context);
     }
     printf("%s\n\n", prompt);
+    fflush(stdout);
+
+    BOOL fits = GetConsoleScreenBufferInfo(output, &before);
     for (int i = 0; i < numOptions; i++) {
-        if (i == selectedOption) {
-            printf("%s> %s%s\n", HIGHLIGHT_COLOR, options[i], RESET_COLOR);
-        } else {
-            printf("  %s\n", options[i]);
+        if (fits && (strlen(options[i]) + 2 >= (size_t)before.dwSize.X)) {
+            fits = FALSE;
         }
+        printMenuOption(options[i], i == selectedOption);
+        printf("\n");
     }
     printf("\nUse arrow keys to navigate and Enter to select\n");
     fflush(stdout);
+
+    // Reject wrapped rows or a layout that scrolled while being drawn.
+    if (fits && GetConsoleScreenBufferInfo(output, &after) &&
+        before.dwCursorPosition.X == 0 && after.dwCursorPosition.X == 0 &&
+        before.dwSize.X == after.dwSize.X &&
+        after.dwCursorPosition.Y - before.dwCursorPosition.Y == numOptions + 2) {
+        layout.firstOption = before.dwCursorPosition;
+        layout.end = after.dwCursorPosition;
+        layout.bufferWidth = after.dwSize.X;
+        layout.valid = TRUE;
+    }
+    return layout;
+}
+
+static BOOL updateMenuSelection(const MenuLayout* layout, const char** options,
+                                int previous, int selected) {
+    HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
+    CONSOLE_SCREEN_BUFFER_INFO info;
+    if (!layout->valid || !GetConsoleScreenBufferInfo(output, &info) ||
+        info.dwSize.X != layout->bufferWidth ||
+        info.dwCursorPosition.X != layout->end.X ||
+        info.dwCursorPosition.Y != layout->end.Y ||
+        layout->firstOption.Y < info.srWindow.Top ||
+        layout->end.Y > info.srWindow.Bottom) {
+        return FALSE;
+    }
+
+    COORD oldRow = {0, (SHORT)(layout->firstOption.Y + previous)};
+    COORD newRow = {0, (SHORT)(layout->firstOption.Y + selected)};
+    if (!SetConsoleCursorPosition(output, oldRow)) return FALSE;
+    printMenuOption(options[previous], 0);
+    fflush(stdout);
+
+    if (!SetConsoleCursorPosition(output, newRow)) return FALSE;
+    printMenuOption(options[selected], 1);
+    fflush(stdout);
+
+    // Restore the cursor below the menu for subsequent output.
+    return SetConsoleCursorPosition(output, layout->end);
 }
 
 int getArrowKeySelection(const char* context, const char* prompt, const char** options, int numOptions) {
@@ -158,7 +219,7 @@ int getArrowKeySelection(const char* context, const char* prompt, const char** o
     int selectedOption = 0;
     int key;
 
-    displayMenu(context, prompt, options, numOptions, selectedOption);
+    MenuLayout layout = displayMenu(context, prompt, options, numOptions, selectedOption);
 
     // Poll with kbhit() so that Ctrl+C can break out.
     while (keepRunning) {
@@ -166,6 +227,7 @@ int getArrowKeySelection(const char* context, const char* prompt, const char** o
             key = _getch();
             if (key == 0 || key == 224) {
                 key = _getch();
+                int previous = selectedOption;
                 if (key == ARROW_UP) {
                     selectedOption = (selectedOption > 0) ? selectedOption - 1 : numOptions - 1;
                 } else if (key == ARROW_DOWN) {
@@ -173,7 +235,10 @@ int getArrowKeySelection(const char* context, const char* prompt, const char** o
                 } else {
                     continue;
                 }
-                displayMenu(context, prompt, options, numOptions, selectedOption);
+                if (previous != selectedOption &&
+                    !updateMenuSelection(&layout, options, previous, selectedOption)) {
+                    layout = displayMenu(context, prompt, options, numOptions, selectedOption);
+                }
             }
             else if (key == ENTER) {
                 return selectedOption;
