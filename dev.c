@@ -453,7 +453,7 @@ void createFiles(ProjectNode* project) {
 
 void executeCommands(ProjectNode* project) {
     if (!keepRunning) return;
-    char command[1024];
+    char command[2048];
     char innerCommand[1024];
     char* terminal = detectCurrentTerminal();
 
@@ -572,11 +572,7 @@ void executeCommands(ProjectNode* project) {
         if (!keepRunning || terminalChoice == -1) return;
         
         if (terminalChoice == 1) {
-            if (project->language == 1) { // Python non-server
-                launchTerminalDirect(terminal, project->directory);
-            } else if (project->language == 2) { // JavaScript non-server
-                launchTerminalDirect(terminal, project->directory);
-            }
+            launchTerminalDirect(terminal, project->directory);
         }
     }
 }
